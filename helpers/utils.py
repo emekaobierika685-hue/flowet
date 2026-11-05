@@ -1,3 +1,4 @@
+# helpers/utils.py
 import random
 import re
 from typing import Any, Dict, List, Tuple, Union
@@ -7,7 +8,8 @@ from datetime import datetime, timezone
 import pytz
 import requests
 
-from tls_client import Session
+# ─── PATCHED: was `from tls_client import Session` (vendored, needs .so files)
+from tls_requests import Client as Session
 
 from . import models
 
@@ -107,6 +109,7 @@ def grid_answer_dict(answer: int) -> Dict[str, Union[str, int]]:
         "y": y,
     }
 
+
 def calculate_timezone_offset(timezone_str: str) -> int:
     utc_now = datetime.now(timezone.utc)
     local_now = utc_now.astimezone(pytz.timezone(timezone_str))
@@ -116,6 +119,7 @@ def calculate_timezone_offset(timezone_str: str) -> int:
         return 0
 
     return int((utf_offset.total_seconds() / 60) * -1)
+
 
 def fetch_ip_data(proxy: str) -> models.IPData:
     response_ip_address: Dict[str, str] = requests.get(
