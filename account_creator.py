@@ -1,23 +1,26 @@
 # account_creator.py
 #
 # Roblox Account Creator — 2025 flow (rblx-challenge-id + Fraudster solver)
+# Single-container, single-port deployment:
+#   :8080  →  /api/create, /api/console, /api/stats, /api/health, /solve
 #
-# Required companion files (must be in the same directory):
+# The /solve route reuses the SAME in-process Funcaptcha instance that
+# solvers/rosolve.py uses for account creation — no separate Flask server,
+# no port 5000, no inter-container HTTP.
+#
+# Required companion files:
 #   headers.py            — headers1..headers6
 #   utils.py              — generate_username, tprint, load_proxies, etc.
 #   secure_auth.py        — get_sa() → secureAuthenticationIntent
 #   tempmail.py           — get_email(), get_inbox()
 #   solvers/__init__.py   — empty package marker
 #   solvers/rosolve.py    — rs_get_token() → Fraudster.solve()
-#   helpers/              — Fraudster helpers/ package
-#   tls_client/           — Fraudster vendored tls_client/ package
-#   data/proxies.txt      — Fraudster proxy pool (may be same as input/proxies.txt)
+#   app.py                — Funcaptcha class (imported, NOT run as __main__)
+#   helpers/              — Fraudster helpers package
+#   data/proxies.txt      — Fraudster proxy pool
 #   data/webgl.json       — Fraudster fingerprints
 #   input/proxies.txt     — Roblox signup proxies (user:pass@host:port)
 #   config.yaml           — generator / solver / account_settings
-#
-# Run: python account_creator.py
-# API: POST http://127.0.0.1:8080/api/create  {"target": "username_or_id", "followers": 1}
 
 import base64
 import html
@@ -74,7 +77,7 @@ def set_runtime_options(ev_enabled, display_cfg):
 
 
 # =========================================================================
-# SSE console (preserved from old account_creator.py)
+# SSE console
 # =========================================================================
 CONSOLE_LISTENERS = []
 CONSOLE_LOCK = threading.Lock()
@@ -101,7 +104,6 @@ def thread_worker():
         proxy = None
         session = None
         try:
-            # ---- proxy ----
             proxy_lines = load_proxies("input/proxies.txt")
             if not proxy_lines:
                 tprint("No proxies available. Stopping all threads...")
@@ -134,7 +136,6 @@ def thread_worker():
             raw_token = response.text.split('data-token="')[1].split('"')[0]
             csrf_token = html.unescape(raw_token)
 
-            # ---- generate identity ----
             username, basic_display_name = generate_username()
             birthday = generate_birthday()
             password = get_password()
@@ -294,7 +295,6 @@ def thread_worker():
             token, reason = solver_func(session, blob, proxy, API_KEY, TIMEOUT)
 
             if token is None:
-                # balance exhaustion
                 if "Insufficient solves" in (reason or ""):
                     with insufficient_balance_lock:
                         if consecutive_insufficient_balance >= MAX_CONSECUTIVE_INSUFFICIENT_BALANCE:
@@ -339,7 +339,6 @@ def thread_worker():
             with insufficient_balance_lock:
                 consecutive_insufficient_balance = 0
 
-            # short token preview for log
             try:
                 md = token.split("|")[0]
                 if "pk=A2A14B1D-1AF3-C791-9BBC-EE33CC7A0A6F" in token:
@@ -534,7 +533,7 @@ def thread_worker():
 
 
 # =========================================================================
-# Follow helper (kept from old code — used by /api/create)
+# Follow helper
 # =========================================================================
 def resolve_username_to_id(username, timeout=10):
     r = requests.post(
@@ -557,7 +556,6 @@ def follow_user(cookie: str, target_id: int, timeout=15) -> bool:
         "Referer": "https://www.roblox.com/",
         "Content-Type": "application/json",
     }
-    # bootstrap CSRF
     r = s.post("https://auth.roblox.com/v1/logout", headers=headers, timeout=timeout)
     xsrf = r.headers.get("x-csrf-token")
     if not xsrf:
@@ -573,7 +571,7 @@ def follow_user(cookie: str, target_id: int, timeout=15) -> bool:
 
 
 # =========================================================================
-# Flask API
+# Flask app — generator routes + /solve (reusing the in-process solver)
 # =========================================================================
 API_KEY = os.environ.get("API_KEY")
 API_PORT = int(os.environ.get("PORT", "8080"))
@@ -611,14 +609,68 @@ def api_stats():
     )
 
 
+# -------------------------------------------------------------------------
+# /solve — the standalone solver API, using the SAME in-process instance
+#         that solvers/rosolve.py uses for account creation.
+# -------------------------------------------------------------------------
+@app.route("/solve", methods=["POST"])
+@require_api_key
+def solve_endpoint():
+    try:
+        data = request.get_json()
+        if not data:
+            return jsonify({"error": "No JSON data provided"}), 400
+
+        private_key = data.get("private_key")
+        blob = data.get("blob")
+        og_cookies = data.get("og_cookies")
+        og_proxy = data.get("og_proxy")
+
+        if not private_key:
+            return jsonify({"error": "Missing required parameter: private_key"}), 400
+        if not og_proxy and not data.get("niggamode"):
+            return jsonify({"error": "Missing required parameter: og_proxy"}), 400
+
+        # Lazy import — app.py's __main__ guard means importing it here does
+        # NOT start a second Flask server on :5000.
+        from app import solver as _solver
+        import helpers.presets as _presets
+
+        preset = _presets.get_preset(private_key)
+        if not preset:
+            return jsonify({"error": f"No preset found for key: {private_key}"}), 404
+
+        if preset.requires_blob and not blob:
+            return jsonify({"error": "Blob is required for this preset but was not provided"}), 400
+
+        result = _solver.solve(
+            preset=preset,
+            blob=blob,
+            og_cookies=og_cookies,
+            og_proxy=og_proxy,
+        )
+        if result.variant:
+            _solver.logger.log(
+                "white",
+                f"Token: {result.token[:28]} | Waves: {result.waves} | Variant: {result.variant}",
+            )
+
+        return jsonify({
+            "solved": result.solved,
+            "token": result.token,
+            "variant": result.variant,
+            "suppressed": result.instapass,
+        }), 200
+
+    except json.JSONDecodeError:
+        return jsonify({"error": "Invalid JSON data provided"}), 400
+    except Exception as e:
+        return jsonify({"error": f"Internal server error: {e}"}), 500
+
+
 @app.route("/api/create", methods=["POST"])
 @require_api_key
 def api_create():
-    """
-    Body: {"target": "username_or_id", "followers": N (default 1)}
-    Creates N accounts synchronously (each may take 30-120s).
-    Returns per-account results.
-    """
     body = request.get_json(silent=True) or {}
     target = body.get("target") or body.get("follow")
     count = int(body.get("followers", 1))
@@ -638,9 +690,7 @@ def api_create():
     for i in range(count):
         log_to_console("STARTED", f"Job {i+1}/{count} for target {target_id}")
         try:
-            # read the freshest account from the output file (worker appends)
             before = _read_output()
-            # trigger one worker iteration synchronously in a thread
             t = threading.Thread(target=thread_worker_iteration, daemon=True)
             t.start()
             t.join(timeout=240)
@@ -658,7 +708,6 @@ def api_create():
                 continue
 
             uid, username, *rest = parts
-            # output format: uid:username[:email]:password:cookie
             if len(rest) == 3:
                 email, password, cookie = rest
             else:
@@ -689,7 +738,6 @@ def api_create():
 
 
 def _read_output():
-    """Return all lines from output/accounts.txt + output/verified_accounts.txt."""
     lines = []
     for path in ("output/accounts.txt", "output/verified_accounts.txt"):
         if os.path.exists(path):
@@ -699,20 +747,15 @@ def _read_output():
 
 
 def thread_worker_iteration():
-    """Wrapper so /api/create can run exactly one worker pass without looping."""
     saved = utils.thread_restart_enabled
     try:
         utils.thread_restart_enabled = True
-        # run worker once by temporarily making it exit after one loop
         _one_shot_worker()
     finally:
         utils.thread_restart_enabled = saved
 
 
 def _one_shot_worker():
-    """Run the body of thread_worker() exactly once."""
-    # easiest: set a thread-local flag the worker checks, but since we don't
-    # want to duplicate the whole body we just monkey-patch the loop guard.
     global _SINGLE_RUN
     _SINGLE_RUN = True
     try:
@@ -724,6 +767,9 @@ def _one_shot_worker():
 _SINGLE_RUN = False
 
 
+# -------------------------------------------------------------------------
+# SSE live console
+# -------------------------------------------------------------------------
 @app.route("/api/console")
 def console_page():
     html_page = """
@@ -811,20 +857,17 @@ def console_stream():
 # Startup
 # =========================================================================
 def bootstrap():
-    """Create dirs, load temp-mail key, apply runtime config, init solver."""
     os.makedirs("input", exist_ok=True)
     os.makedirs("output", exist_ok=True)
     os.makedirs("logs", exist_ok=True)
     os.makedirs("solver-db", exist_ok=True)
 
-    # --- temp-mail key ---
     key, err = get_tempmail_public_apiKey()
     if key:
         tprint(f"temp-mail API key loaded ({key[:6]}…)")
     else:
         wprint(f"temp-mail key unavailable: {err} (EV will fail if enabled)")
 
-    # --- runtime options from config ---
     cfg = load_config()
     acc = cfg.get("account_settings", {}) or {}
     ev_cfg = (acc.get("email_verification") or {})
@@ -838,15 +881,14 @@ def bootstrap():
     if DISPLAY_NAME_CFG_RUNTIME.get("enabled"):
         tprint(f"Display name: ENABLED (mode={DISPLAY_NAME_CFG_RUNTIME.get('mode')})")
 
-    # --- warm up the Fraudster solver ---
+    # Warm up the in-process solver (this also imports app.py, but its
+    # __main__ guard prevents a second Flask server on :5000)
     try:
-        from solvers.rosolve import _get_solver
-        _get_solver()
-        tprint("Fraudster solver initialized")
+        from app import solver as _solver
+        tprint(f"Fraudster solver initialized ({type(_solver).__name__})")
     except Exception as e:
         wprint(f"Fraudster solver warm-up failed: {e}")
 
-    # --- spawn worker threads ---
     n_threads = int(cfg.get("threads", {}).get("main", 10))
     for i in range(n_threads):
         t = threading.Thread(target=thread_worker, name=f"worker-{i}", daemon=True)
