@@ -39,8 +39,7 @@ ENV PYTHONUNBUFFERED=1 \
 
 # ---- OS packages ----
 #  - curl_cffi needs libcurl4 + OpenSSL
-#  - tls_client Go binding needs libc (already present)
-#  - build-essential only for pip compile of some wheels (kept small)
+#  - tini reaps zombies from worker subprocesses (Node child procs)
 #  - ca-certificates for HTTPS
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates \
@@ -83,27 +82,56 @@ COPY . /app
 # Runtime dirs (mounted in prod, but created here so container works standalone)
 RUN mkdir -p /app/input /app/output /app/logs /app/solver-db /app/data
 
-# Sanity check: the Go TLS library must exist for the current arch
+# Sanity check: the Go TLS library must exist for the current arch.
+#
+# NOTE: platform.machine() on amd64 Linux returns "x86_64", NOT "x86".
+# The 32-bit filename "-x86.so" is only for genuine i386/i686 machines.
 RUN python - <<'PY'
-import ctypes, platform, sys, os
+import ctypes, sys, os
 from sys import platform as p
 from platform import machine
+
+m = machine().lower()
+
 if p == "darwin":
-    ext = "-arm64.dylib" if machine() == "arm64" else "-x86.dylib"
+    # macOS
+    if m == "arm64":
+        ext = "-arm64.dylib"
+    else:
+        ext = "-x86.dylib"
 elif p in ("win32", "cygwin"):
-    ext = "-64.dll" if 8 == ctypes.sizeof(ctypes.c_voidp) else "-32.dll"
+    # Windows
+    ext = "-64.dll" if ctypes.sizeof(ctypes.c_voidp) == 8 else "-32.dll"
 else:
-    if machine() == "aarch64":
+    # Linux / other POSIX
+    if m == "aarch64" or m == "arm64":
         ext = "-arm64.so"
-    elif "x86" in machine():
+    elif m in ("i386", "i686", "x86"):
+        # genuine 32-bit only
         ext = "-x86.so"
     else:
+        # x86_64, amd64, etc.
         ext = "-amd64.so"
+
 path = f"/app/tls_client/dependencies/tls-client{ext}"
+
 if not os.path.exists(path):
     print(f"[FATAL] Missing tls-client library: {path}", file=sys.stderr)
-    print("Check that you copied tls_client/dependencies/ into the image.", file=sys.stderr)
+    print(f"        python platform : {p}", file=sys.stderr)
+    print(f"        machine()       : {machine()!r}", file=sys.stderr)
+    print(f"        expected file   : tls-client{ext}", file=sys.stderr)
+    print("", file=sys.stderr)
+    print("Files present in /app/tls_client/dependencies/:", file=sys.stderr)
+    deps_dir = "/app/tls_client/dependencies"
+    if os.path.isdir(deps_dir):
+        for entry in sorted(os.listdir(deps_dir)):
+            print(f"  - {entry}", file=sys.stderr)
+    else:
+        print(f"  (directory does not exist: {deps_dir})", file=sys.stderr)
+    print("", file=sys.stderr)
+    print("Fix: re-copy tls_client/dependencies/ from the Fraudster repo.", file=sys.stderr)
     sys.exit(1)
+
 print(f"[OK] tls-client library present: {path}")
 PY
 
