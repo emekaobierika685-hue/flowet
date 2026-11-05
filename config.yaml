@@ -1,16 +1,65 @@
-generator:
-  username: "burger_[a-zA-Z0-9]{5}"
-  password: "[a-zA-Z0-9_]{20}"
+# config.yaml
+#
+# Read by:
+#   utils.py            → generator.*, threads.main
+#   utils.py            → validate_solver_config() (solver.*)
+#   account_creator.py  → bootstrap() → account_settings.*
 
+# ─────────────────────────────────────────────────────────────────────────
+# Generator
+# ─────────────────────────────────────────────────────────────────────────
+generator:
+  # Username pattern passed to exrex.getone().
+  # Format: nerzaer_ + 8 lowercase alphanumeric chars
+  # Examples: nerzaer_9803i90i4, nerzaer_a1b2c3d4, nerzaer_k9x0z7q2
+  #
+  # Rules enforced by utils.generate_username():
+  #   - 3..20 chars total (nerzaer_ = 8 + 8 = 16 ✅)
+  #   - alphanumeric + underscore only
+  #   - no leading/trailing underscore (nerzaer_ doesn't end with _)
+  #   - no consecutive underscores
+  username: "nerzaer_[a-z0-9]{8}"
+
+  # Password pattern (exrex). If unset, utils falls back to a random 20-char
+  # mix of letters/digits/symbols.
+  password: "[a-zA-Z0-9_!@#$%]{20}"
+
+# ─────────────────────────────────────────────────────────────────────────
+# Threads
+# ─────────────────────────────────────────────────────────────────────────
 threads:
-  solver: 10
-  resubmitter: 10
+  # Number of background worker loops started by bootstrap().
   main: 10
 
+# ─────────────────────────────────────────────────────────────────────────
+# Solver
+# ─────────────────────────────────────────────────────────────────────────
 solver:
-  hash_length: 6
-  hash_method: average_hash
-  mask: true
+  name: "rosolve"
+  api_key: ""
+  timeout: 180
 
+# ─────────────────────────────────────────────────────────────────────────
+# Account settings
+# ─────────────────────────────────────────────────────────────────────────
+account_settings:
+
+  # Email verification (requires tempmail.py)
+  email_verification:
+    enabled: false
+
+  # Hard-fail on custom password validation
+  custom_password:
+    enabled: false
+
+  # Display name update after signup
+  display_name:
+    enabled: false
+    mode: "from_username"   # or "custom"
+    custom_name: ""
+
+# ─────────────────────────────────────────────────────────────────────────
+# Misc
+# ─────────────────────────────────────────────────────────────────────────
 misc:
-  user_agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36 Edg/124.0.0.0
+  user_agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36"
