@@ -1,3 +1,4 @@
+# === Account creator base ===
 Pillow>=8.0.0
 imagehash>=4.1.0
 numpy>=1.19.0
@@ -6,3 +7,17 @@ requests>=2.24.0
 PyYAML>=5.3.0
 exrex>=0.10.5
 flask>=2.0.0
+
+# === Fraudster solver dependencies ===
+cryptography
+curl_cffi
+javascript
+mmh3
+orjson
+pytz
+rich
+typing_extensions
+urllib3
+wrapper_tls_requests
+
+# ❌ REMOVED: tls_client  (Fraudster vendors its own under ./tls_client/)
