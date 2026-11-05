@@ -1,28 +1,119 @@
-FROM python:3.10-slim
+# Dockerfile
+#
+# Multi-stage build:
+#   Stage 1 (node-build):  install Node 20 + jsdom (needed by helpers/arkose.py)
+#   Stage 2 (final):       Python 3.11 + Node 20 binaries + all Python deps
+#
+# Build:
+#   docker build -t roblox-gen:latest .
+#
+# Run:
+#   docker run --rm -it -p 8080:8080 \
+#     -v $PWD/input:/app/input:ro \
+#     -v $PWD/output:/app/output \
+#     -v $PWD/logs:/app/logs \
+#     -v $PWD/config.yaml:/app/config.yaml:ro \
+#     -e TEMPMail_PROVIDER=priyo \
+#     roblox-gen:latest
 
-# Install Node.js (required for fp.js) and system dependencies
+# =========================================================================
+# Stage 1: Node toolchain (provides node + jsdom for helpers/arkose.py)
+# =========================================================================
+FROM node:20-bookworm-slim AS node-build
+
+WORKDIR /nodeapp
+RUN npm init -y >/dev/null 2>&1 && \
+    npm install --omit=dev jsdom@24 >/dev/null 2>&1
+
+# =========================================================================
+# Stage 2: Python runtime
+# =========================================================================
+FROM python:3.11-slim-bookworm
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    NODE_PATH=/usr/lib/node_modules \
+    NODE_ENV=production
+
+# ---- OS packages ----
+#  - curl_cffi needs libcurl4 + OpenSSL
+#  - tls_client Go binding needs libc (already present)
+#  - build-essential only for pip compile of some wheels (kept small)
+#  - ca-certificates for HTTPS
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    nodejs \
-    npm \
-    curl \
-    ca-certificates \
-    build-essential \
-    libjpeg-dev \
-    zlib1g-dev \
+        ca-certificates \
+        libcurl4 \
+        libssl3 \
+        libffi8 \
+        libxml2 \
+        libxslt1.1 \
+        tini \
     && rm -rf /var/lib/apt/lists/*
 
+# ---- Node runtime (copy from stage 1) ----
+COPY --from=node-build /usr/local/bin/node /usr/local/bin/node
+COPY --from=node-build /usr/local/lib/node_modules /usr/local/lib/node_modules
+RUN ln -sf /usr/local/lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm 2>/dev/null || true
+# Expose jsdom to NODE_PATH so `require('jsdom')` resolves
+RUN mkdir -p /usr/lib/node_modules && \
+    cp -a /usr/local/lib/node_modules/* /usr/lib/node_modules/ 2>/dev/null || true
+
+# ---- Python deps ----
+# Copy requirements first for layer caching
 WORKDIR /app
+COPY requirements.txt /app/requirements.txt
+RUN pip install --upgrade pip && \
+    pip install -r /app/requirements.txt
 
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+# ---- Application code ----
+# Copy the whole project. Everything the runtime needs must already be on disk:
+#   account_creator.py, headers.py, utils.py, secure_auth.py, tempmail.py,
+#   config.yaml,
+#   solvers/__init__.py, solvers/rosolve.py,
+#   helpers/            (Fraudster helpers package)
+#   tls_client/         (Fraudster vendored tls_client package,
+#                        including tls_client/dependencies/tls-client-*.so)
+#   app.py              (Fraudster solver class)
+#   data/proxies.txt
+#   data/webgl.json
+COPY . /app
 
-COPY . .
+# Runtime dirs (mounted in prod, but created here so container works standalone)
+RUN mkdir -p /app/input /app/output /app/logs /app/solver-db /app/data
 
-# Railway uses a dynamic PORT, but we default to 5000 just in case
-ENV PORT=5000
-ENV MODE=api
+# Sanity check: the Go TLS library must exist for the current arch
+RUN python - <<'PY'
+import ctypes, platform, sys, os
+from sys import platform as p
+from platform import machine
+if p == "darwin":
+    ext = "-arm64.dylib" if machine() == "arm64" else "-x86.dylib"
+elif p in ("win32", "cygwin"):
+    ext = "-64.dll" if 8 == ctypes.sizeof(ctypes.c_voidp) else "-32.dll"
+else:
+    if machine() == "aarch64":
+        ext = "-arm64.so"
+    elif "x86" in machine():
+        ext = "-x86.so"
+    else:
+        ext = "-amd64.so"
+path = f"/app/tls_client/dependencies/tls-client{ext}"
+if not os.path.exists(path):
+    print(f"[FATAL] Missing tls-client library: {path}", file=sys.stderr)
+    print("Check that you copied tls_client/dependencies/ into the image.", file=sys.stderr)
+    sys.exit(1)
+print(f"[OK] tls-client library present: {path}")
+PY
 
-# Expose the port (Railway maps this automatically)
-EXPOSE 5000
+# ---- Healthcheck ----
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+    CMD python -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8080/api/health',timeout=3).status==200 else 1)" || exit 1
+
+EXPOSE 8080
+
+# tini reaps zombies from worker subprocesses (Node child procs)
+ENTRYPOINT ["/usr/bin/tini", "--"]
 
 CMD ["python", "-u", "account_creator.py"]
