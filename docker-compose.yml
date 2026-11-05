@@ -1,4 +1,15 @@
 # docker-compose.yml
+#
+# Single container. Single published port (:8080).
+#   /api/create   → create + follow accounts
+#   /api/console  → SSE live console (HTML)
+#   /api/stats    → JSON counters
+#   /api/health   → healthcheck
+#   /solve        → standalone solver API (same in-process Funcaptcha instance)
+#
+# The solver runs in the same process as the generator — no second container,
+# no port 5000, no inter-process HTTP.
+
 version: "3.8"
 
 services:
@@ -10,46 +21,35 @@ services:
     container_name: roblox-gen
     restart: unless-stopped
 
-    # ----- Network -----
+    command: ["python", "-u", "account_creator.py"]
+
     ports:
       - "8080:8080"
 
-    # ----- Env -----
     environment:
-      # Flask
+      PYTHONUNBUFFERED: "1"
       PORT: "8080"
-      # Optional: set to require X-API-Key on /api/create
-      # API_KEY: "change-me"
-      # Temp-mail provider: priyo | mailtm
       TEMPMail_PROVIDER: "priyo"
-      # Optional: override blob if you have one
-      # ROBLOX_BLOB: ""
+      # Optional: require X-API-Key on /api/create and /solve
+      # API_KEY: "change-me"
 
-    # ----- Volumes -----
     volumes:
-      # Roblox signup proxies (read-only, edited on host)
       - ./input:/app/input:ro
-      # Fraudster proxy pool (read-only)
       - ./data:/app/data:ro
-      # Config (read-only)
       - ./config.yaml:/app/config.yaml:ro
-      # Outputs (persist across restarts)
       - ./output:/app/output
-      # Live logs
       - ./logs:/app/logs
-      # Fraudster's good-proxy cache
       - ./solver-db:/app/solver-db
 
-    # ----- Logging -----
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8080/api/health', timeout=3).status == 200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      start_period: 30s
+      retries: 3
+
     logging:
       driver: json-file
       options:
         max-size: "20m"
         max-file: "3"
-
-    # ----- Resource limits (optional; adjust for your host) -----
-    # deploy:
-    #   resources:
-    #     limits:
-    #       cpus: "2.0"
-    #       memory: 2G
