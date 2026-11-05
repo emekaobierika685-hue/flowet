@@ -1,3 +1,4 @@
+# app.py
 import base64
 import ctypes
 import json
@@ -17,7 +18,14 @@ import tls_requests
 from tls_requests import TLSClient
 
 exceptions = helpers.exceptions
-SetConsoleTitle = ctypes.windll.kernel32.SetConsoleTitleW
+
+# ─── PATCHED: cross-platform SetConsoleTitle (no-op on Linux/macOS)
+try:
+    SetConsoleTitle = ctypes.windll.kernel32.SetConsoleTitleW
+except AttributeError:
+    def SetConsoleTitle(_title: str) -> None:
+        pass  # no-op on non-Windows
+
 TLSClient.initialize()
 
 _PROXIES = None
@@ -35,6 +43,7 @@ def load_data():
             with open("data/webgl.json", "rb") as file:
                 _WEBGLS = orjson.loads(file.read())
     return _PROXIES, _WEBGLS
+
 
 class SessionPool:
     def __init__(self, size: int = 50):
@@ -575,6 +584,7 @@ class Funcaptcha:
             except Exception as e:
                 self.logger.log("red", f"Error solving captcha: {str(e)}")
                 raise
+
 
 if __name__ == "__main__":
     solver = Funcaptcha()
