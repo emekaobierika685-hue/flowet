@@ -1,15 +1,55 @@
+# docker-compose.yml
 version: "3.8"
 
 services:
   generator:
-    build: .
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: roblox-gen:latest
     container_name: roblox-gen
     restart: unless-stopped
+
+    # ----- Network -----
+    ports:
+      - "8080:8080"
+
+    # ----- Env -----
+    environment:
+      # Flask
+      PORT: "8080"
+      # Optional: set to require X-API-Key on /api/create
+      # API_KEY: "change-me"
+      # Temp-mail provider: priyo | mailtm
+      TEMPMail_PROVIDER: "priyo"
+      # Optional: override blob if you have one
+      # ROBLOX_BLOB: ""
+
+    # ----- Volumes -----
     volumes:
-      - ./logs:/app/logs
-      - ./solver-db:/app/solver-db
-      - ./proxies.txt:/app/proxies.txt:ro
+      # Roblox signup proxies (read-only, edited on host)
+      - ./input:/app/input:ro
+      # Fraudster proxy pool (read-only)
+      - ./data:/app/data:ro
+      # Config (read-only)
       - ./config.yaml:/app/config.yaml:ro
-    # Roblox signup endpoints are HTTPS — outbound only, no ports needed
-    stdin_open: true
-    tty: true
+      # Outputs (persist across restarts)
+      - ./output:/app/output
+      # Live logs
+      - ./logs:/app/logs
+      # Fraudster's good-proxy cache
+      - ./solver-db:/app/solver-db
+
+    # ----- Logging -----
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "3"
+
+    # ----- Resource limits (optional; adjust for your host) -----
+    # deploy:
+    #   resources:
+    #     limits:
+    #       cpus: "2.0"
+    #       memory: 2G
