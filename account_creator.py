@@ -1,67 +1,98 @@
 ## Roblox account generator /w gametype-1 funcaptcha solver
 ## twitter.com/h0nde
 ## 2020-09-07
+## === FRAUDSTER INTEGRATION (2025) ===
 
-from funcaptcha import FunCaptchaSession, Proxy, BadGameTypeOrVariant, BannedProxy
-from fingerprint import Fingerprint, Window
-from threading import Thread, Lock, Event
-from queue import Queue, Full as QueueFull, Empty as QueueEmpty
-from counter import Counter, IntervalCounter
+import os
+import sys
+import json
+import time
 import itertools
 import random
-import imageutil
-import pickle
-import time
-import os
 import secrets
-import exrex
-import requests
-import ctypes
-import yaml
-import uuid
-import sys
 import traceback
-import signal
-import json
+import ctypes
+from threading import Thread, Lock, Event
+from queue import Queue, Full as QueueFull, Empty as QueueEmpty
 
+import requests
+import yaml
+import exrex
 from flask import Flask, request, jsonify, Response, redirect
+
+# === FRAUDSTER INTEGRATION: import the new solver + helpers ===
+# Add the project root to sys.path so `helpers` and `tls_client` resolve
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+import helpers
+import helpers.utils
+import helpers.models
+import helpers.presets
+import helpers.exceptions
+from app import Funcaptcha as FraudsterSolver   # re-use the solver class from your app.py
+
+# The old modules are GONE. If you still want the local imagehash path for
+# gameType 1, re-enable `imageutil.py` — but it will not match current Arkose
+# images, so we drop it.
+# from funcaptcha import ...      # REMOVED
+# from imageutil import ...       # REMOVED
+# from fingerprint import ...     # REMOVED (Fraudster has its own models.UserBrowser)
 
 if not os.path.exists("solver-db"): os.mkdir("solver-db")
 if not os.path.exists("logs"): os.mkdir("logs")
 
-## Load config
+# --- Config ---
 with open("config.yaml") as f:
     config = yaml.safe_load(f)
-    hash_length = config["solver"]["hash_length"]
-    hash_method = imageutil.methods[config["solver"]["hash_method"]]
-    masking = config["solver"]["mask"]
-    solver_count = config["threads"]["solver"]
-    resubmitter_count = config["threads"]["resubmitter"]
-    thread_count = config["threads"]["main"]
     user_agent = config["misc"]["user_agent"]
-
     un_gen = lambda: exrex.getone(config["generator"]["username"], limit=20)
     pw_gen = lambda: exrex.getone(config["generator"]["password"], limit=50)
-    
+
 bheaders = {
     "User-Agent": user_agent,
     "Origin": "https://www.roblox.com",
     "Referer": "https://www.roblox.com/account/signupredir"
 }
 
-## Counters
+# === FRAUDSTER INTEGRATION: counters (reuse the existing ones) ===
+from counter import Counter, IntervalCounter
 created_counter = IntervalCounter()
 solver_success_counter = Counter()
 solver_failure_counter = Counter()
 
-## Solver variables
-solved_queue = Queue()
-resubmit_queue = Queue()
-appear = {}
-cache = {}
+# === FRAUDSTER INTEGRATION: solver singleton ===
+# We create ONE Funcaptcha instance and share it across threads.
+# Fraudster is already thread-safe (SessionPool + Lock).
+_SOLVER: "FraudsterSolver | None" = None
+_SOLVER_LOCK = Lock()
+
+def get_solver() -> FraudsterSolver:
+    global _SOLVER
+    with _SOLVER_LOCK:
+        if _SOLVER is None:
+            _SOLVER = FraudsterSolver(max_workers=100, session_pool_size=50)
+        return _SOLVER
+
+# === FRAUDSTER INTEGRATION: preset for Roblox ===
+ROBLOX_PRESET_KEY = "A2A14B1D-1AF3-C791-9BBC-EE33CC7A0A6F"
+
+# === FRAUDSTER INTEGRATION: proxy loading ===
+# Fraudster's SessionPool pulls proxies from `data/proxies.txt` internally,
+# but per-task proxies (og_proxy) take precedence, so we read the same file
+# to pick one per Roblox signup.
+if os.path.exists("proxies.txt"):
+    with open("proxies.txt") as f:
+        _RAW_PROXIES = [p.strip() for p in f.read().splitlines() if p.strip()]
+elif os.environ.get("PROXIES"):
+    _RAW_PROXIES = [p.strip() for p in os.environ["PROXIES"].split(",") if p.strip()]
+else:
+    _RAW_PROXIES = []
+
+proxy_cycle = itertools.cycle(_RAW_PROXIES) if _RAW_PROXIES else None
+
 
 # =========================================================================
-# LIVE CONSOLE LOGGING SYSTEM (SSE)
+# LIVE CONSOLE LOGGING SYSTEM (SSE)  — unchanged
 # =========================================================================
 CONSOLE_LISTENERS = []
 CONSOLE_LOCK = Lock()
@@ -94,48 +125,78 @@ def gen_username():
 def gen_password():
     return pw_gen()
 
-class Proxy(Proxy):
+
+# =========================================================================
+# ROBlox PROXY WRAPPER (adapted)
+# =========================================================================
+# We keep a tiny wrapper because Roblox's signup needs to persist the
+# .ROBLOSECURITY cookie between the CSRF retry and the final request.
+class RobloxProxy:
     def __init__(self, proxy):
         self.xsrf_token = None
-        super().__init__(proxy, "http")
+        self.raw = proxy          # "user:pass@host:port" or "host:port"
+        # For `requests` we need the full URL
+        if "@" in proxy:
+            userpass, hostport = proxy.rsplit("@", 1)
+            self.requests_url = f"http://{userpass}@{hostport}"
+        else:
+            self.requests_url = f"http://{proxy}"
 
-if os.path.exists("proxies.txt"):
-    with open("proxies.txt") as f:
-        proxies = list(map(Proxy, f.read().splitlines()))
-elif os.environ.get("PROXIES"):
-    proxies = list(map(Proxy, os.environ.get("PROXIES").split(",")))
-else:
-    proxies = []
-proxies = itertools.cycle(proxies) if proxies else None
+def next_proxy() -> "RobloxProxy | None":
+    if proxy_cycle is None:
+        return None
+    return RobloxProxy(next(proxy_cycle))
 
-def get_identity():
-    window = Window("Roblox", "https://www.roblox.com/account/signupredir")
-    fp = Fingerprint(
-        user_agent=user_agent, protochain_hash="5d76839801bc5904a4f12f1731a7b6d1",
-        sec_fetch=True, content_type_value="application/x-www-form-urlencoded; charset=UTF-8",
-        accept_language_value="en-US,en;q=0.9",
-        jsbd_gen=lambda w: dict(HL=random.randint(1,5), NCE=True, DT=w.title, NWD="undefined", DA=None, DR=None, DMT=random.randint(1,40), DO=None, DOT=random.randint(30,50)),
-        DNT="unknown", L="en-US", D=24, PR=1, S="1920,1080", AS="1920,1040", SS=True, LS=True, IDB=True, B=False, ODB=True, CPUC="unknown", PK="Win32",
-        JSF="Arial,Arial Black,Arial Narrow,Book Antiqua,Bookman Old Style,Calibri,Cambria,Cambria Math,Century,Century Gothic,Century Schoolbook,Comic Sans MS,Consolas,Courier,Courier New,Garamond,Georgia,Helvetica,Impact,Lucida Bright,Lucida Calligraphy,Lucida Console,Lucida Fax,Lucida Handwriting,Lucida Sans,Lucida Sans Typewriter,Lucida Sans Unicode,Microsoft Sans Serif,Monotype Corsiva,MS Gothic,MS PGothic,MS Reference Sans Serif,MS Sans Serif,MS Serif,Palatino Linotype,Segoe Print,Segoe Script,Segoe UI,Segoe UI Light,Segoe UI Semibold,Segoe UI Symbol,Tahoma,Times,Times New Roman,Trebuchet MS,Verdana,Wingdings,Wingdings 2,Wingdings 3",
-        P="Chrome PDF Plugin,Chrome PDF Viewer,Native Client", T="0,false,false", H="8", SWF=False
-    )
-    return fp, window
 
-def get_session():
-    fp, window = get_identity()
-    fcs = FunCaptchaSession(
-        public_key="A2A14B1D-1AF3-C791-9BBC-EE33CC7A0A6F", service_url="https://roblox-api.arkoselabs.com",
-        window=window, fingerprint=fp, analytics=True, whitelisted_types=[1], whitelisted_variants=None,
-        proxy=next(proxies) if proxies else None
-    )
-    return fcs
+# =========================================================================
+# === FRAUDSTER INTEGRATION: solve_one_captcha ===
+# =========================================================================
+def solve_one_captcha(timeout=180) -> str:
+    """
+    Uses the Fraudster solver to obtain a raw Arkose token for Roblox.
+    Returns the raw token string (challenge_data.token.raw).
+    """
+    solver = get_solver()
+    preset = helpers.presets.get_preset(ROBLOX_PRESET_KEY)
+    if preset is None:
+        raise RuntimeError("Roblox preset missing from helpers/presets.py")
 
-def prepare_image(im, label=None):
-    im = imageutil.remove_background(im)
-    im = im.crop(im.getbbox())
-    if masking: im = imageutil.mask(im)
-    return im
+    proxy = next_proxy()
+    log_to_console("STARTED", f"Solving captcha via Fraudster (proxy={'yes' if proxy else 'no'})")
 
+    # Roblox's sitekey requires `blob` — Fraudster needs it.
+    # The blob is normally scraped from https://www.roblox.com/arkose/iframe.
+    # If you don't have one, pass None and the solver will still try
+    # (but Roblox *will* reject unblobbed tokens in most cases).
+    blob = os.environ.get("ROBLOX_BLOB")  # optional override
+
+    try:
+        result = solver.solve(
+            preset=preset,
+            blob=blob,
+            og_proxy=proxy.raw if proxy else None,
+        )
+    except helpers.exceptions.FuncaptchaError as e:
+        solver_failure_counter.add()
+        log_to_console("FAILED", f"Fraudster solve failed: {e}")
+        raise CaptchaError(str(e))
+    except Exception as e:
+        solver_failure_counter.add()
+        log_to_console("FAILED", f"Fraudster solve crashed: {e}\n{traceback.format_exc()}")
+        raise CaptchaError(str(e))
+
+    if not result.solved:
+        solver_failure_counter.add()
+        raise CaptchaError("Fraudster returned solved=False")
+
+    solver_success_counter.add()
+    log_to_console("CAPTCHA", f"Captcha solved | Waves: {result.waves} | Variant: {result.variant or 'suppressed'}")
+    return result.token
+
+
+# =========================================================================
+# SignupError / CaptchaError
+# =========================================================================
 class SignupError(Exception): pass
 class CaptchaError(Exception): pass
 
@@ -152,30 +213,55 @@ def raise_for_error(r):
             e = CaptchaError if err["code"] == 2 else SignupError
             raise e("%s (code %d)" % (err["message"], err["code"]))
 
-def create_account(ch):
+
+# =========================================================================
+# === FRAUDSTER INTEGRATION: create_account rewritten ===
+# =========================================================================
+def create_account(token: str, proxy: "RobloxProxy | None") -> CreatedAccount:
+    """
+    Creates a Roblox account using a pre-solved captcha token.
+    If Roblox's CSRF cookie is missing, we re-fetch a *new* token and retry.
+    """
     username = gen_username()
     password = gen_password()
-    log_to_console("STARTED", f"Account generation started: {username}")
-    
-    def send():
+    log_to_console("STARTED", f"Creating account: {username}")
+
+    def send(tok):
+        proxies = {"https": proxy.requests_url} if proxy else None
         return requests.post(
             url="https://auth.roblox.com/v2/signup",
-            headers={**bheaders, "X-CSRF-TOKEN": ch.proxy.xsrf_token or "-"},
-            proxies={"https": "%s:%d" % (ch.proxy.host, ch.proxy.port)} if ch.proxy else None,
+            headers={**bheaders, "X-CSRF-TOKEN": (proxy.xsrf_token if proxy else None) or "-"},
+            proxies=proxies,
             timeout=15,
-            json=dict(username=username, password=password, gender="Male", birthday="2000-01-01", isTosAgreementBoxChecked=True, captchaToken=ch.full_token, captchaProvider="PROVIDER_ARKOSE_LABS")
+            json=dict(
+                username=username, password=password, gender="Male",
+                birthday="2000-01-01", isTosAgreementBoxChecked=True,
+                captchaToken=tok, captchaProvider="PROVIDER_ARKOSE_LABS"
+            )
         )
+
     try:
-        r = send()
-        if "x-csrf-token" in r.headers:
-            ch.proxy.xsrf_token = r.headers["x-csrf-token"]
-            r = send()
+        r = send(token)
+        # CSRF bootstrap — Roblox returns 403 with x-csrf-token header
+        if r.status_code == 403 and "x-csrf-token" in r.headers:
+            if proxy:
+                proxy.xsrf_token = r.headers["x-csrf-token"]
+            r = send(token)
+
+        # If captcha was invalidated by the CSRF round-trip, re-solve once.
+        if r.status_code in (400, 403) and r.json().get("errors", [{}])[0].get("code") == 2:
+            log_to_console("CAPTCHA", "Captcha invalidated by CSRF retry; re-solving...")
+            token = solve_one_captcha()     # fresh token
+            r = send(token)
+
         raise_for_error(r)
         cookie = r.cookies[".ROBLOSECURITY"]
         return CreatedAccount(r.json()["userId"], username, password, cookie)
+
     except Exception as e:
         log_to_console("FAILED", f"Roblox rejected account: {e}")
-        raise e
+        raise
+
 
 # =========================================================================
 # API & FOLLOW LOGIC
@@ -213,48 +299,19 @@ def follow_user(account, target_id, timeout=15):
     if r.status_code >= 400: raise RuntimeError(f"Roblox follow failed: {r.status_code} {r.text[:100]}")
     return True
 
-def solve_one_captcha(timeout=15):
-    deadline = time.time() + timeout
-    session = get_session()
-    while time.time() < deadline:
-        try:
-            print("[*] Fetching Captcha challenge...")
-            fc = session.get_challenge()
-            print("[+] Challenge fetched! Images:", len(fc.image_urls))
-            for imdata in fc.images:
-                im = imageutil.to_pil(imdata)
-                mim = prepare_image(im, label="main")
-                mh = imageutil.hash_image(mim, hash_method, hash_length)
-                appear[mh] = 1
-                rd = 0.0
-                max_steps = int(360 / fc.rotate_degree) if fc.rotate_degree else 0
-                for rn in range(1, max_steps):
-                    rd = fc.rotate_degree * rn
-                    rk = "%s|%.2f" % (mh, rd)
-                    rh = cache.get(rk)
-                    if not rh:
-                        rim = prepare_image(im.rotate(rd * -1), label="rotate")
-                        rh = imageutil.hash_image(rim, hash_method, hash_length)
-                        cache[rk] = rh
-                    if rh not in appear: break
-                solved = bool(fc.check_answer(rd))
-                if solved:
-                    log_to_console("CAPTCHA", f"Captcha solved")
-                    return fc
-                break
-        except Exception as e:
-            print("[-] Solver Error:", e)
-            session.close_conns()
-            session = get_session()
-    raise TimeoutError("Solver timed out (proxies might be dead)")
 
-# -------------------------------------------------------------------------
+# =========================================================================
 # API ROUTES
-# -------------------------------------------------------------------------
+# =========================================================================
 
 @app.route("/")
 def index():
     return redirect("/api/console")
+
+@app.route("/api/health")
+def api_health():
+    # railway.json healthcheck path
+    return jsonify(ok=True)
 
 @app.route("/api/stats")
 def api_stats():
@@ -281,13 +338,18 @@ def api_create():
         except Exception as e: return jsonify(error=f"Target lookup failed: {e}"), 404
 
     results = []
-    
+
     for i in range(count):
         try:
             log_to_console("STARTED", f"Starting job {i+1}/{count} for target {target_id}")
-            ch = solve_one_captcha()
-            acct = create_account(ch)
-            
+
+            # === FRAUDSTER INTEGRATION: solve captcha first ===
+            proxy = next_proxy()
+            token = solve_one_captcha()
+
+            # === FRAUDSTER INTEGRATION: signup ===
+            acct = create_account(token, proxy)
+
             follow_status = "success"
             try:
                 follow_user(acct, target_id)
@@ -302,7 +364,7 @@ def api_create():
                 "cookie": acct.safe_cookie(),
                 "follow_status": follow_status
             })
-            
+
         except Exception as e:
             results.append({"error": str(e)})
 
@@ -342,7 +404,7 @@ def console_page():
             const consoleDiv = document.getElementById('console');
             const statsDiv = document.getElementById('stats');
             const evtSource = new EventSource("/api/console/stream");
-            
+
             evtSource.onmessage = function(e) {
                 const data = JSON.parse(e.data);
                 if(data.type === "PING") return;
@@ -371,12 +433,12 @@ def console_stream():
         while True:
             try: yield f"data: {q.get(timeout=20)}\n\n"
             except QueueEmpty: yield "data: " + json.dumps({"type": "PING"}) + "\n\n"
-                
+
     q = Queue(maxsize=100)
     with CONSOLE_LOCK: CONSOLE_LISTENERS.append(q)
     def on_close():
         with CONSOLE_LOCK: CONSOLE_LISTENERS.remove(q)
-            
+
     resp = Response(event_stream(q), mimetype="text/event-stream")
     resp.headers['Cache-Control'] = 'no-cache'
     resp.headers['X-Accel-Buffering'] = 'no'
@@ -384,4 +446,11 @@ def console_stream():
     return resp
 
 if __name__ == "__main__":
+    # === FRAUDSTER INTEGRATION: bootstrap solver once at startup ===
+    try:
+        get_solver()
+        log_to_console("STARTED", "Fraudster solver initialized")
+    except Exception as e:
+        print(f"[FATAL] Could not init Fraudster solver: {e}")
+
     app.run(host="0.0.0.0", port=API_PORT, threaded=True)
