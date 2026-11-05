@@ -1,0 +1,35 @@
+# .dockerignore
+.git
+.gitignore
+.venv
+venv
+env
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.Python
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# Runtime artifacts — mounted at run time, must not be baked into the image
+output/
+logs/
+solver-db/
+data/good_proxies.txt
+data/good_webgl.json
+input/proxies.txt
+
+# Editor / OS noise
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db
+
+# Local secrets
+.env
+.env.*
+config.local.yaml
