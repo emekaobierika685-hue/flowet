@@ -1,0 +1,15 @@
+version: "3.8"
+
+services:
+  generator:
+    build: .
+    container_name: roblox-gen
+    restart: unless-stopped
+    volumes:
+      - ./logs:/app/logs
+      - ./solver-db:/app/solver-db
+      - ./proxies.txt:/app/proxies.txt:ro
+      - ./config.yaml:/app/config.yaml:ro
+    # Roblox signup endpoints are HTTPS — outbound only, no ports needed
+    stdin_open: true
+    tty: true

@@ -1,0 +1,16 @@
+{
+  "name": "roblox-account-generator-fp",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Node runtime dependency for fp.js (fingerprintjs2 minified hash helper)",
+  "main": "fp.js",
+  "scripts": {
+    "test:fp": "node -e \"require('fs').readFileSync('fp.js','utf8')\"",
+    "hash": "node fp.js"
+  },
+  "engines": {
+    "node": ">=12"
+  },
+  "dependencies": {},
+  "devDependencies": {}
+}
