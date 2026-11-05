@@ -2,13 +2,15 @@
 #
 # Build for the wrapper_tls_requests variant of app.py.
 #
-# Stage 1 (node-build):  Node 20 + jsdom  (needed by helpers/arkose.py's t_guess)
-# Stage 2 (final):       Python 3.11 + Node binaries + Python deps
+# Stage 1 (node-build):  Node 22 + jsdom  (Node 22 is required: jsdom's
+#                        undici dep calls zlib.createZstdDecompress, which
+#                        only exists in Node >= 22.15)
+# Stage 2 (final):       Python 3.11 + Node 22 binaries + Python deps
 
 # =========================================================================
 # Stage 1: Node toolchain (jsdom for helpers/arkose.py)
 # =========================================================================
-FROM node:20-bookworm-slim AS node-build
+FROM node:22-bookworm-slim AS node-build
 
 WORKDIR /nodeapp
 RUN npm init -y >/dev/null 2>&1 && \
@@ -38,7 +40,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         tini \
     && rm -rf /var/lib/apt/lists/*
 
-# ---- Node runtime ----
+# ---- Node runtime (from Node 22 stage) ----
 COPY --from=node-build /usr/local/bin/node /usr/local/bin/node
 COPY --from=node-build /usr/local/lib/node_modules /usr/local/lib/node_modules
 RUN ln -sf /usr/local/lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm 2>/dev/null || true
