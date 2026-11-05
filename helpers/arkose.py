@@ -1,3 +1,4 @@
+# helpers/arkose.py
 import base64
 import hashlib
 import json
@@ -11,7 +12,8 @@ from cryptography.hazmat.primitives import padding
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from javascript import require
 
-from tls_client import Session
+# ─── PATCHED: was `from tls_client import Session` (vendored, needs .so files)
+from tls_requests import Client as Session
 
 from . import models
 
