@@ -19,12 +19,11 @@ from tls_requests import TLSClient
 
 exceptions = helpers.exceptions
 
-# ─── PATCHED: cross-platform SetConsoleTitle (no-op on Linux/macOS)
 try:
     SetConsoleTitle = ctypes.windll.kernel32.SetConsoleTitleW
 except AttributeError:
     def SetConsoleTitle(_title: str) -> None:
-        pass  # no-op on non-Windows
+        pass
 
 TLSClient.initialize()
 
@@ -77,7 +76,7 @@ class SessionPool:
             client_identifier=f"okhttp4_android_{userbrowser.android_version}",
         )
 
-        session.timeout = (5, 10)  # Connect timeout, Read timeout
+        session.timeout = (5, 10)
 
         base_headers = helpers.constants.BASE_HEADERS
         base_headers.update({
@@ -94,7 +93,6 @@ class SessionPool:
 
 class Funcaptcha:
     def __init__(self, max_workers: int = 100, session_pool_size: int = 50) -> None:
-        # Load data once
         load_data()
 
         self.session_pool = SessionPool(session_pool_size)
@@ -196,12 +194,7 @@ class Funcaptcha:
             raise exceptions.ChallengeDataError("Failed to get challenge")
         return helpers.models.ChallengeData.from_raw_data(jsn)
 
-    def init_load(
-        self,
-        session: tls_requests.Client,
-        preset: helpers.models.Preset,
-        challenge_data: helpers.models.ChallengeData,
-    ) -> None:
+    def init_load(self, session, preset, challenge_data) -> None:
         new_headers = helpers.constants.INIT_LOAD_HEADERS
         helpers.utils.update_headers(session, new_headers)
         cookies = {**session.cookies, "timestamp": helpers.arkose.short_esync()}
@@ -211,15 +204,9 @@ class Funcaptcha:
             cookies=cookies,
         )
 
-    def challenge_index(
-        self,
-        session: tls_requests.Client,
-        preset: helpers.models.Preset,
-        challenge_data: helpers.models.ChallengeData,
-    ) -> str:
+    def challenge_index(self, session, preset, challenge_data) -> str:
         new_headers = helpers.constants.CHALLENGE_INDEX_HEADERS
         helpers.utils.update_headers(session, new_headers)
-
         params = {
             "session": challenge_data.token.game_token,
             "r": challenge_data.token.region,
@@ -232,40 +219,22 @@ class Funcaptcha:
             "smurl": challenge_data.token.smurl,
             "theme": "default",
         }
+        return session.get(challenge_data.game_path, params=params).url
 
-        return session.get(challenge_data.game_path, params=params).url  # type:ignore
-
-    def send_analytics(
-        self,
-        session: tls_requests.Client,
-        preset: helpers.models.Preset,
-        data: Dict[str, Any],
-        referer: str,
-        forced_headers: Optional[Dict[str, Any]] = None,
-    ) -> None:
+    def send_analytics(self, session, preset, data, referer, forced_headers=None) -> None:
         new_headers = helpers.constants.ANALYTICS_HEADERS
         timestamp = helpers.arkose.x_ark_esync()
-        new_headers.update(
-            {
-                "referer": referer,
-                "origin": preset.site_url,
-                "x-newrelic-timestamp": timestamp,
-            }
-        )
+        new_headers.update({
+            "referer": referer,
+            "origin": preset.site_url,
+            "x-newrelic-timestamp": timestamp,
+        })
         cookies = {**session.cookies, "timestamp": timestamp}
         helpers.utils.update_headers(session, new_headers)
         headers = forced_headers if forced_headers else session.headers
-        session.post(
-            f"{preset.api_url}/fc/a/", data=data, cookies=cookies, headers=headers
-        )
+        session.post(f"{preset.api_url}/fc/a/", data=data, cookies=cookies, headers=headers)
 
-    def site_url_analytics(
-        self,
-        session: tls_requests.Client,
-        preset: helpers.models.Preset,
-        challenge_data: helpers.models.ChallengeData,
-        referer: str,
-    ) -> None:
+    def site_url_analytics(self, session, preset, challenge_data, referer) -> None:
         data = {
             "sid": challenge_data.token.region,
             "session_token": challenge_data.token.game_token,
@@ -278,13 +247,7 @@ class Funcaptcha:
         }
         self.send_analytics(session, preset, data, referer)
 
-    def game_loaded_analytics(
-        self,
-        session: tls_requests.Client,
-        preset: helpers.models.Preset,
-        challenge: helpers.models.Challenge,
-        referer: str,
-    ) -> None:
+    def game_loaded_analytics(self, session, preset, challenge, referer) -> None:
         data = {
             "sid": challenge.challenge_data.token.region,
             "session_token": challenge.challenge_data.token.game_token,
@@ -299,13 +262,7 @@ class Funcaptcha:
         }
         self.send_analytics(session, preset, data, referer)
 
-    def clicked_verify_analytics(
-        self,
-        session: tls_requests.Client,
-        preset: helpers.models.Preset,
-        challenge: helpers.models.Challenge,
-        referer: str,
-    ) -> None:
+    def clicked_verify_analytics(self, session, preset, challenge, referer) -> None:
         headers = {
             "accept": "*/*",
             "accept-encoding": "gzip, deflate, br, zstd",
@@ -325,14 +282,11 @@ class Funcaptcha:
             "user-agent": session.headers["User-Agent"],
             "x-newrelic-timestamp": helpers.arkose.x_newrelic_timestamp(),
             "x-requested-id": helpers.arkose.aes_encrypt(
-                json.dumps(
-                    {"sc": [random.randint(100, 200), random.randint(100, 200)]}
-                ).replace(" ", ""),
+                json.dumps({"sc": [random.randint(100, 200), random.randint(100, 200)]}).replace(" ", ""),
                 f"requested{challenge.challenge_data.token.game_token}id",
             ),
             "x-requested-with": "XMLHttpRequest",
         }
-
         data = {
             "sid": challenge.challenge_data.token.region,
             "session_token": challenge.challenge_data.token.game_token,
@@ -347,30 +301,18 @@ class Funcaptcha:
         }
         self.send_analytics(session, preset, data, referer, forced_headers=headers)
 
-    def answer(
-        self,
-        session: tls_requests.Client,
-        preset: helpers.models.Preset,
-        challenge: helpers.models.Challenge,
-        referer: str,
-        answers: List[str],
-        dapib_code: str,
-    ) -> Dict[str, Any]:
+    def answer(self, session, preset, challenge, referer, answers, dapib_code):
         new_headers = helpers.constants.GET_FULL_CHALLENGE_HEADERS
         timestamp = helpers.arkose.x_ark_esync()
-        new_headers.update(
-            {
-                "origin": preset.site_url,
-                "referer": referer,
-                "x-newrelic-timestamp": timestamp,
-            }
-        )
+        new_headers.update({
+            "origin": preset.site_url,
+            "referer": referer,
+            "x-newrelic-timestamp": timestamp,
+        })
         answers_new = str([",".join(answers)]).replace("'", "")
-
         result = helpers.arkose.aes_encrypt(
             answers_new, challenge.challenge_data.token.game_token
         )
-
         data = {
             "session_token": challenge.challenge_data.token.game_token,
             "game_token": challenge.challenge_id,
@@ -381,7 +323,6 @@ class Funcaptcha:
             "bio": helpers.bio.BioGenerator().generate(),
             "is_compatibility_mode": challenge.challenge_data.compatibility_mode_enabled,
         }
-
         if dapib_code:
             data["tguess"] = helpers.arkose.t_guess(
                 session, answers, dapib_code, challenge.challenge_data.token.game_token
@@ -390,22 +331,14 @@ class Funcaptcha:
         response = session.post(f"{preset.api_url}/fc/ca/", data=data, cookies=cookies)
         return response.json()
 
-    def get_challenge(
-        self,
-        session: tls_requests.Client,
-        preset: helpers.models.Preset,
-        challenge_data: helpers.models.ChallengeData,
-        referer: str,
-    ) -> helpers.models.Challenge:
+    def get_challenge(self, session, preset, challenge_data, referer):
         new_headers = helpers.constants.GET_FULL_CHALLENGE_HEADERS
         timestamp = helpers.arkose.x_ark_esync()
-        new_headers.update(
-            {
-                "origin": preset.site_url,
-                "referer": referer,
-                "x-newrelic-timestamp": timestamp,
-            }
-        )
+        new_headers.update({
+            "origin": preset.site_url,
+            "referer": referer,
+            "x-newrelic-timestamp": timestamp,
+        })
         cookies = {**session.cookies, "timestamp": timestamp}
         helpers.utils.update_headers(session, new_headers)
         data = {
@@ -418,7 +351,6 @@ class Funcaptcha:
             "apiBreakerVersion": "green",
             "analytics_tier": challenge_data.token.at,
         }
-
         r = session.post(f"{preset.api_url}/fc/gfct/", data=data, cookies=cookies)
         return helpers.models.Challenge.from_raw_data(r.json(), challenge_data)
 
@@ -426,32 +358,20 @@ class Funcaptcha:
         response = session.get(img_url)
         if response.status_code != 200:
             raise exceptions.ImageDownloadError(f"Failed to download image: {img_url}")
-
         base64_img = base64.b64encode(response.content).decode("utf-8")
         index_predicted = helpers.classification.predict_image(
             base64_img, challenge, response.content
         )
-
         if challenge.game_type == 3:
             index_predicted += 1
-            answer = json.dumps(
-                helpers.utils.grid_answer_dict(index_predicted)
-            ).replace(" ", "")
+            answer = json.dumps(helpers.utils.grid_answer_dict(index_predicted)).replace(" ", "")
         else:
             answer = json.dumps({"index": index_predicted}).replace(" ", "")
-
         return (index, answer)
 
-    def solve(
-        self,
-        preset: helpers.models.Preset,
-        origin_page: Optional[str] = None,
-        blob: Optional[str] = None,
-        og_cookies: Optional[Dict[str, Any]] = None,
-        og_proxy: Optional[str] = None,
-    ) -> helpers.models.Captcha:
+    def solve(self, preset, origin_page=None, blob=None, og_cookies=None, og_proxy=None):
         if isinstance(preset, str):
-            preset = helpers.presets.get_preset(preset)  # type:ignore
+            preset = helpers.presets.get_preset(preset)
         if preset is None:
             raise exceptions.PresetNotFoundError(f"Couldn't find preset for {preset}")
         retries = 2
@@ -463,7 +383,6 @@ class Funcaptcha:
                 userbrowser = helpers.models.UserBrowser(
                     android_version=android_version, chrome_version=chrome_version
                 )
-
                 session = self.session_pool.get_session(preset, userbrowser)
                 if og_cookies:
                     session.cookies = og_cookies
@@ -477,22 +396,15 @@ class Funcaptcha:
                         with self.lock:
                             self.update_data(session, preset)
 
-                    challenge_data = self.get_challenge_data(
-                        session, preset, webgl, origin_page, blob
-                    )
-                    if challenge_data.token.sup1:
-                        self.logger.log(
-                            "white",
-                            f"Token: {challenge_data.token.game_token} | Waves: 0 | Suppressed",
-                        )
-                        session.headers.update(
-                            {
-                                "sec-fetch-dest": "script",
-                                "sec-fetch-mode": "no-cors",
-                                "sec-fetch-site": "same-origin",
-                            }
-                        )
+                    challenge_data = self.get_challenge_data(session, preset, webgl, origin_page, blob)
 
+                    if challenge_data.token.sup1:
+                        self.logger.log("white", f"Token: {challenge_data.token.game_token} | Waves: 0 | Suppressed")
+                        session.headers.update({
+                            "sec-fetch-dest": "script",
+                            "sec-fetch-mode": "no-cors",
+                            "sec-fetch-site": "same-origin",
+                        })
                         self.init_load(session, preset, challenge_data)
                         session.get(
                             f"{preset.api_url}/fc/a/",
@@ -505,7 +417,6 @@ class Funcaptcha:
                                 "data[site]": preset.site_url,
                             },
                         )
-
                         self.solved += 1
                         self.instapass += 1
                         return helpers.models.Captcha(
@@ -520,9 +431,7 @@ class Funcaptcha:
                     challenge = self.get_challenge(session, preset, challenge_data, referer)
                     self.logger.log("white", f"Got challenge | Waves: {challenge.waves} | Variant: {challenge.variant if challenge.variant else 'suppressed'}")
                     if challenge.waves > 15:
-                        raise exceptions.TooManyWavesError(
-                            f"Too many waves ({challenge.waves})"
-                        )
+                        raise exceptions.TooManyWavesError(f"Too many waves ({challenge.waves})")
 
                     self.site_url_analytics(session, preset, challenge_data, referer)
                     self.game_loaded_analytics(session, preset, challenge, referer)
@@ -532,22 +441,14 @@ class Funcaptcha:
                     for img in challenge.images:
                         response = session.get(img)
                         if response.status_code != 200:
-                            raise exceptions.ImageDownloadError(
-                                f"Failed to download image: {img}"
-                            )
-
+                            raise exceptions.ImageDownloadError(f"Failed to download image: {img}")
                         base64_img = base64.b64encode(response.content).decode("utf-8")
                         index = helpers.classification.predict_image(
                             base64_img, challenge, response.content
                         )
-
                         if challenge.game_type == 3:
                             index += 1
-                            answers.append(
-                                json.dumps(helpers.utils.grid_answer_dict(index)).replace(
-                                    " ", ""
-                                )
-                            )
+                            answers.append(json.dumps(helpers.utils.grid_answer_dict(index)).replace(" ", ""))
                         else:
                             answers.append(json.dumps({"index": index}).replace(" ", ""))
 
@@ -560,9 +461,7 @@ class Funcaptcha:
                     if challenge.dapib_url:
                         dapib_code = session.get(challenge.dapib_url).text
 
-                    solved = self.answer(
-                        session, preset, challenge, referer, answers, dapib_code
-                    )
+                    solved = self.answer(session, preset, challenge, referer, answers, dapib_code)
 
                     is_solved = solved.get("solved", False)
                     if is_solved:
@@ -577,69 +476,61 @@ class Funcaptcha:
                         variant=challenge.variant,
                         instapass=False,
                     )
-
                 finally:
                     self.session_pool.return_session(session)
-
             except Exception as e:
                 self.logger.log("red", f"Error solving captcha: {str(e)}")
                 raise
 
 
-if __name__ == "__main__":
-    solver = Funcaptcha()
-    stop_event = Event()
-    app = Flask(__name__)
+# -------------------------------------------------------------------------
+# MODULE-LEVEL SINGLETON — REQUIRED for `from app import solver`
+# -------------------------------------------------------------------------
+solver = Funcaptcha()
 
-    @app.route('/solve', methods=['POST'])
-    def solve_endpoint() -> tuple[dict, int]:
+
+# -------------------------------------------------------------------------
+# Standalone entrypoint — only runs with `python app.py` directly.
+# Importing `app` from account_creator.py SKIPS this block.
+# -------------------------------------------------------------------------
+if __name__ == "__main__":
+    stop_event = Event()
+    standalone_app = Flask("fraudster-standalone")
+
+    @standalone_app.route("/solve", methods=["POST"])
+    def _standalone_solve():
         try:
             data = request.get_json()
             if not data:
-                return jsonify({'error': 'No JSON data provided'}), 400
-
-            private_key = data.get('private_key')
-            blob = data.get('blob')
-            og_cookies = data.get('og_cookies')
-            og_proxy = data.get('og_proxy')
-
+                return jsonify({"error": "No JSON data provided"}), 400
+            private_key = data.get("private_key")
+            blob = data.get("blob")
+            og_cookies = data.get("og_cookies")
+            og_proxy = data.get("og_proxy")
             if not private_key:
-                return jsonify({'error': 'Missing required parameter: private_key'}), 400
-            if not og_proxy and not data.get('niggamode'):
-                return jsonify({'error': 'Missing required parameter: og_proxy'}), 400
-
+                return jsonify({"error": "Missing private_key"}), 400
+            if not og_proxy and not data.get("niggamode"):
+                return jsonify({"error": "Missing og_proxy"}), 400
             preset = helpers.presets.get_preset(private_key)
             if not preset:
-                return jsonify({'error': f'No preset found for key: {private_key}'}), 404
-
+                return jsonify({"error": f"No preset for key: {private_key}"}), 404
             if preset.requires_blob and not blob:
-                return jsonify({'error': 'Blob is required for this preset but was not provided'}), 400
-
-            result = solver.solve(
-                preset=preset,
-                blob=blob,
-                og_cookies=og_cookies,
-                og_proxy=og_proxy
-            )
-            if result.variant:
-                solver.logger.log(
-                    "white",
-                    f"Token: {result.token[:28]} | Waves: {result.waves} | Variant: {result.variant}",
-                )
-
+                return jsonify({"error": "Blob required for this preset"}), 400
+            result = solver.solve(preset=preset, blob=blob, og_cookies=og_cookies, og_proxy=og_proxy)
             return jsonify({
-                'solved': result.solved,
-                'token': result.token,
-                'variant': result.variant,
-                'suppressed': result.instapass
+                "solved": result.solved,
+                "token": result.token,
+                "variant": result.variant,
+                "suppressed": result.instapass,
             }), 200
-
         except json.JSONDecodeError:
-            return jsonify({'error': 'Invalid JSON data provided'}), 400
-        except Exception:
-            #print(traceback.format_exc())
-            return jsonify({'error': 'Internal server error'}), 500
+            return jsonify({"error": "Invalid JSON"}), 400
+        except Exception as e:
+            return jsonify({"error": f"Internal server error: {e}"}), 500
 
-    Thread(target=lambda: app.run(host='0.0.0.0', port=5000), daemon=True).start()
+    Thread(
+        target=lambda: standalone_app.run(host="0.0.0.0", port=5000),
+        daemon=True,
+    ).start()
     while not stop_event.is_set():
         time.sleep(1)
