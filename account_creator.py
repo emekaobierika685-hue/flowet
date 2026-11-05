@@ -1,27 +1,4 @@
 # account_creator.py
-#
-# Roblox Account Creator — 2025 flow (rblx-challenge-id + Fraudster solver)
-# Single-container, single-port deployment:
-#   :8080  →  /api/create, /api/console, /api/stats, /api/health, /solve
-#
-# The /solve route reuses the SAME in-process Funcaptcha instance that
-# solvers/rosolve.py uses for account creation — no separate Flask server,
-# no port 5000, no inter-container HTTP.
-#
-# Required companion files:
-#   headers.py            — headers1..headers6
-#   utils.py              — generate_username, tprint, load_proxies, etc.
-#   secure_auth.py        — get_sa() → secureAuthenticationIntent
-#   tempmail.py           — get_email(), get_inbox()
-#   solvers/__init__.py   — empty package marker
-#   solvers/rosolve.py    — rs_get_token() → Fraudster.solve()
-#   app.py                — Funcaptcha class (imported, NOT run as __main__)
-#   helpers/              — Fraudster helpers package
-#   data/proxies.txt      — Fraudster proxy pool
-#   data/webgl.json       — Fraudster fingerprints
-#   input/proxies.txt     — Roblox signup proxies (user:pass@host:port)
-#   config.yaml           — generator / solver / account_settings
-
 import base64
 import html
 import json
@@ -104,7 +81,19 @@ def thread_worker():
         proxy = None
         session = None
         try:
-            proxy_lines = load_proxies("input/proxies.txt")
+            # ---- DEBUG: Check proxy file ----
+            proxy_path = "input/proxies.txt"
+            if not os.path.exists(proxy_path):
+                tprint(f"❌ DEBUG: File not found at {os.path.abspath(proxy_path)}")
+                tprint(f"❌ DEBUG: Current directory is {os.getcwd()}")
+                tprint(f"❌ DEBUG: Files in root: {os.listdir('.')}")
+            else:
+                with open(proxy_path, "r") as f:
+                    lines = f.read().splitlines()
+                tprint(f"✅ DEBUG: Found {len(lines)} lines in {proxy_path}")
+            # --------------------------------
+
+            proxy_lines = load_proxies(proxy_path)
             if not proxy_lines:
                 tprint("No proxies available. Stopping all threads...")
                 utils.thread_restart_enabled = False
@@ -609,10 +598,6 @@ def api_stats():
     )
 
 
-# -------------------------------------------------------------------------
-# /solve — the standalone solver API, using the SAME in-process instance
-#         that solvers/rosolve.py uses for account creation.
-# -------------------------------------------------------------------------
 @app.route("/solve", methods=["POST"])
 @require_api_key
 def solve_endpoint():
@@ -631,8 +616,6 @@ def solve_endpoint():
         if not og_proxy and not data.get("niggamode"):
             return jsonify({"error": "Missing required parameter: og_proxy"}), 400
 
-        # Lazy import — app.py's __main__ guard means importing it here does
-        # NOT start a second Flask server on :5000.
         from app import solver as _solver
         import helpers.presets as _presets
 
@@ -767,9 +750,6 @@ def _one_shot_worker():
 _SINGLE_RUN = False
 
 
-# -------------------------------------------------------------------------
-# SSE live console
-# -------------------------------------------------------------------------
 @app.route("/api/console")
 def console_page():
     html_page = """
@@ -881,8 +861,6 @@ def bootstrap():
     if DISPLAY_NAME_CFG_RUNTIME.get("enabled"):
         tprint(f"Display name: ENABLED (mode={DISPLAY_NAME_CFG_RUNTIME.get('mode')})")
 
-    # Warm up the in-process solver (this also imports app.py, but its
-    # __main__ guard prevents a second Flask server on :5000)
     try:
         from app import solver as _solver
         tprint(f"Fraudster solver initialized ({type(_solver).__name__})")
